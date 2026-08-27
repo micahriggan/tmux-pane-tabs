@@ -32,3 +32,9 @@ tmux bind-key T run-shell "$SCRIPT new '#{pane_id}'"
 tmux bind-key N run-shell "$SCRIPT next '#{pane_id}'"
 tmux bind-key P run-shell "$SCRIPT prev '#{pane_id}'"
 tmux bind-key X run-shell "$SCRIPT close '#{pane_id}'"
+
+# remain-on-exit makes tmux emit pane-died (not pane-exited). At that point the
+# dead pane still exists, so it can be replaced with the next tab before it is
+# removed.
+tmux set-hook -gu pane-exited 2>/dev/null || true
+tmux set-hook -g pane-died "run-shell \"$SCRIPT exited '#{pane_id}'\""

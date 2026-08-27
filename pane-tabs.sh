@@ -69,6 +69,9 @@ ensure_group() {
         set_option "$pane" "$GROUP_OPTION" "$group"
         set_option "$pane" "$INDEX_OPTION" 0
     fi
+    # Enable remain-on-exit so the pane stays alive when the shell exits,
+    # allowing the pane-died hook to do tab-close instead of killing the pane.
+    tmux set-option -p -q -t "$pane" remain-on-exit on
     printf '%s\n' "$group"
 }
 
@@ -133,6 +136,8 @@ new_tab() {
     new="$(tmux new-window -dP -F '#{pane_id}' -t "=${store}:" -c "$cwd")"
     set_option "$new" "$GROUP_OPTION" "$group"
     set_option "$new" "$INDEX_OPTION" "$index"
+    # Keep the pane alive after the shell exits so the hook can do tab-close.
+    tmux set-option -p -q -t "$new" remain-on-exit on
     zoomed="$(tmux display-message -p -t "$current" '#{window_zoomed_flag}')"
     tmux swap-pane -d -s "$new" -t "$current"
 
@@ -200,11 +205,49 @@ close_tab() {
     message "Closed tab; now $position/$((count - 1))"
 }
 
+# Called by the pane-died hook when a pane's shell exits naturally.
+# If the pane has tabs, perform a tab-close instead of letting tmux kill
+# the pane. If it is the only tab (or has no tabs), do nothing and let
+# tmux handle cleanup normally.
+exited_tab() {
+    local current="$1" group count index target target_index position
+    group="$(get_option "$current" "$GROUP_OPTION")"
+    if [ -z "$group" ]; then
+        # No tabs — let tmux kill the pane normally.
+        return
+    fi
+
+    count="$(tab_count "$group")"
+    if [ "$count" -le 1 ]; then
+        # Last tab — clear remain-on-exit so tmux can close the pane normally.
+        tmux set-option -p -q -t "$current" remain-on-exit off
+        tmux kill-pane -t "$current"
+        return
+    fi
+
+    index="$(get_option "$current" "$INDEX_OPTION")"
+    target="$(next_target "$group" "$index")"
+    [ -n "$target" ] || { tmux kill-pane -t "$current"; return; }
+    target_index="$(get_option "$target" "$INDEX_OPTION")"
+
+    tmux swap-pane -d -s "$target" -t "$current"
+    tmux kill-pane -t "$current"
+    position="$(tab_position "$group" "$target_index")"
+    update_all_pane_titles "$group"
+    message "Tab exited; now $position/$((count - 1))"
+}
+
 command="${1:-}"
 pane="${2:-}"
-if [ -z "$pane" ] || ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-    message "Pane tabs: invoking pane no longer exists"
-    exit 0
+
+# For the 'exited' command the pane's shell has already died; tmux still knows
+# about the pane (remain-on-exit keeps it) but display-message may fail on some
+# versions. Skip the liveness check and let exited_tab handle it gracefully.
+if [ "$command" != "exited" ]; then
+    if [ -z "$pane" ] || ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+        message "Pane tabs: invoking pane no longer exists"
+        exit 0
+    fi
 fi
 
 case "$command" in
@@ -212,6 +255,7 @@ case "$command" in
     next)  switch_tab next "$pane" ;;
     prev)  switch_tab prev "$pane" ;;
     close) close_tab "$pane" ;;
+    exited) exited_tab "$pane" ;;
     *)
         printf 'usage: %s {new|next|prev|close} pane-id\n' "$0" >&2
         exit 2
